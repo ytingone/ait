@@ -28,6 +28,8 @@
 
 ## 架构决策
 
+- [ADR-190：原生会话列表独立响应接纳](decisions/providers/adr-190-native-session-list-response-admission.md)：复用有界响应任务，保留全局 64 命令上限，为原生会话列表设置 16 命令子限额、独立响应预算与四个执行槽位，避免慢 Provider 列表阻塞同连接中的其他列表。
+
 - [ADR-189：Pi 不暴露 Host 模式](decisions/providers/adr-189-pi-without-host-mode.md)：移除合成的 Native Tools／`default` 模式；Pi 继续直接拥有工具与设置，旧记录仅保留输入兼容；[验证报告](reports/providers/pi-mode-removal-2026-10-24.md)。
 
 - [ADR-188：网页客户端以独立镜像部署在网站根路径](decisions/clients/adr-188-standalone-web-client-image.md)：根路径单页导出、静态 Nginx 镜像与 GHCR 发布，移除内嵌「管理」tab；修订 ADR-132。

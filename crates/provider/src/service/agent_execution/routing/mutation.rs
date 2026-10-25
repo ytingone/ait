@@ -139,7 +139,10 @@ impl Router {
                     params,
                     reply,
                     cancel: None,
-                    permit,
+                    permit: super::super::CommandPermits {
+                        _command: permit,
+                        _listing: None,
+                    },
                     queued: std::time::Instant::now(),
                 },
                 scoped,

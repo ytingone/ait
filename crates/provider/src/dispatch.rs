@@ -37,9 +37,7 @@ impl std::ops::Deref for State {
 
 pub(crate) mod agent_execution;
 mod agent_runtime;
-mod catalog;
-
-pub(crate) use catalog::METHODS as CATALOG_METHODS;
+pub(crate) mod response_admission;
 
 /// Check exact Agent resource occupancy without serializing behind a native startup.
 /// # Errors
@@ -171,10 +169,10 @@ pub async fn dispatch(
         }
         Err(error) => return Err(error),
     }
-    match requests::catalog(context, state) {
+    match requests::response_admission(context, state) {
         Ok(()) => return Ok(None),
         Err(DispatchError::NotImplemented) => {
-            Context::assert_unhandled(context, "provider::catalog");
+            Context::assert_unhandled(context, "provider::response_admission");
         }
         Err(error) => return Err(error),
     }

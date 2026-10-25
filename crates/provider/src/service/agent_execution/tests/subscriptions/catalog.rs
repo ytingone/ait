@@ -130,7 +130,7 @@ async fn discovery_queue_is_bounded_and_shutdown_drains_accepted_requests() {
     for _ in 0..63 {
         replies.push(
             execution
-                .admit_catalog(
+                .admit_response(
                     "provider.models.list.request",
                     json!({"provider":"codex","cwd":fixture.cwd}),
                 )
@@ -245,7 +245,7 @@ async fn catalog_response_slots_remain_bounded_until_their_owners_are_dropped() 
     for _ in 0..63 {
         responses.push(
             execution
-                .admit_catalog(
+                .admit_response(
                     "provider.models.list.request",
                     json!({"provider":"codex","cwd":fixture.cwd}),
                 )
@@ -253,25 +253,34 @@ async fn catalog_response_slots_remain_bounded_until_their_owners_are_dropped() 
         );
     }
     assert!(matches!(
-        execution.admit_catalog(
+        execution.admit_response(
             "provider.models.list.request",
             json!({"provider":"codex","cwd":fixture.cwd})
         ),
         Err(ErrorCode::CatalogBusy)
     ));
+    assert!(matches!(
+        execution.admit_response(
+            "provider.sessions.recent.list.request",
+            json!({"providers":[]}),
+        ),
+        Err(ErrorCode::CatalogBusy)
+    ));
+    assert_eq!(execution.0.session_list_admission.available_permits(), 16);
+    assert_eq!(execution.0.session_list_responses.available_permits(), 16);
     gate.release();
     discovery.await.unwrap();
     for response in &mut responses {
         assert!(response.receive().await.unwrap()["models"].is_array());
     }
     let retained = execution
-        .admit_catalog(
+        .admit_response(
             "provider.models.list.request",
             json!({"provider":"codex","cwd":fixture.cwd}),
         )
         .unwrap();
     assert!(matches!(
-        execution.admit_catalog(
+        execution.admit_response(
             "provider.models.list.request",
             json!({"provider":"codex","cwd":fixture.cwd})
         ),

@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-mod catalog;
 mod lane;
+mod response_admission;
 mod routing;
 mod voice;
 pub(crate) mod waits;
@@ -44,13 +44,19 @@ pub struct ExecutionDependencies {
     pub lifetime: Arc<dyn Send + Sync>,
 }
 
+// Both permits live until command completion, including routing and execution waits.
+struct CommandPermits {
+    _command: OwnedSemaphorePermit,
+    _listing: Option<OwnedSemaphorePermit>,
+}
+
 enum Command {
     Request {
         method: String,
         params: Value,
         reply: oneshot::Sender<Result<Value, ErrorCode>>,
         cancel: Option<CancellationToken>,
-        permit: OwnedSemaphorePermit,
+        permit: CommandPermits,
         queued: std::time::Instant,
     },
     Shutdown(oneshot::Sender<Result<(), ErrorCode>>),
@@ -62,6 +68,8 @@ struct Worker {
     cancellation: CancellationToken,
     admission: Arc<Semaphore>,
     catalog_responses: Arc<Semaphore>,
+    session_list_admission: Arc<Semaphore>,
+    session_list_responses: Arc<Semaphore>,
     thread: Mutex<Option<JoinHandle<()>>>,
     events: SessionEvents,
     timeline: crate::storage::timeline::Timeline,
@@ -80,13 +88,13 @@ struct OwnedRuntime {
 #[derive(Clone)]
 pub struct AgentExecution(Arc<Worker>);
 
-/// Owns one discovery response slot through transport delivery, including after worker completion.
-pub(crate) struct CatalogResponse {
+/// Owns one discovery or session-list response slot through transport delivery.
+pub(crate) struct AdmittedResponse {
     receiver: oneshot::Receiver<Result<Value, ErrorCode>>,
     _permit: OwnedSemaphorePermit,
 }
 
-impl CatalogResponse {
+impl AdmittedResponse {
     /// Wait for the admitted result without releasing the bounded response slot.
     pub(crate) async fn receive(&mut self) -> Result<Value, ErrorCode> {
         (&mut self.receiver).await.map_err(|_| ErrorCode::AgentIo)?
@@ -135,7 +143,7 @@ impl AgentExecution {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let (sender, receiver) = mpsc::channel(64);
+        let (sender, receiver) = mpsc::channel(response_admission::COMMAND_CAPACITY);
         let template = Arc::new(Mutex::new(ExecutionState {
             message_observers: std::collections::BTreeMap::new(),
             owners: crate::service::agent_manager::ownership::Owners::default().with_changes(
@@ -170,8 +178,12 @@ impl AgentExecution {
             sender,
             template,
             cancellation,
-            admission: Arc::new(Semaphore::new(64)),
-            catalog_responses: Arc::new(Semaphore::new(64)),
+            admission: Arc::new(Semaphore::new(response_admission::COMMAND_CAPACITY)),
+            catalog_responses: Arc::new(Semaphore::new(
+                response_admission::CATALOG_RESPONSE_CAPACITY,
+            )),
+            session_list_admission: Arc::new(Semaphore::new(response_admission::LISTING_CAPACITY)),
+            session_list_responses: Arc::new(Semaphore::new(response_admission::LISTING_CAPACITY)),
             thread: Mutex::new(Some(thread)),
             events,
             timeline,
@@ -223,8 +235,8 @@ impl AgentExecution {
     /// # Errors
     /// Returns safe validation, admission, provider or registry errors.
     pub async fn execute(&self, method: &str, params: Value) -> Result<Value, ErrorCode> {
-        if catalog::handles(method) {
-            return self.catalog(method, params).await;
+        if response_admission::handles(method) {
+            return self.admit_response(method, params)?.receive().await;
         }
         if method != "agent.finish.wait.request" {
             return self.call(method, params).await;
@@ -256,31 +268,43 @@ impl AgentExecution {
         result
     }
 
-    async fn catalog(&self, method: &str, params: Value) -> Result<Value, ErrorCode> {
-        self.admit_catalog(method, params)?.receive().await
-    }
-
-    /// Synchronously reserve bounded discovery work before a transport spawns its response task.
+    /// Reserve bounded discovery or session-list work before spawning its transport response task.
+    /// Listings also reserve a permit from their sublimit within the global command budget.
     /// The returned owner retains its slot until delivery or caller cancellation.
     /// # Errors
-    /// Rejects non-catalog methods, shutdown, a closed worker or exhausted request/response slots.
-    pub(crate) fn admit_catalog(
+    /// Rejects unsupported methods, shutdown, a closed worker or exhausted command/response slots.
+    pub(crate) fn admit_response(
         &self,
         method: &str,
         params: Value,
-    ) -> Result<CatalogResponse, ErrorCode> {
-        if !catalog::handles(method) {
+    ) -> Result<AdmittedResponse, ErrorCode> {
+        if !response_admission::handles(method) {
             return Err(ErrorCode::UnsupportedCapability);
         }
         if self.0.cancellation.is_cancelled() {
             return Err(ErrorCode::AgentIo);
         }
-        let permit = self
-            .0
-            .catalog_responses
+        let listing = method == "provider.sessions.recent.list.request";
+        let responses = if listing {
+            &self.0.session_list_responses
+        } else {
+            &self.0.catalog_responses
+        };
+        let permit = responses
             .clone()
             .try_acquire_owned()
             .map_err(|_| ErrorCode::CatalogBusy)?;
+        let listing_permit = if listing {
+            Some(
+                self.0
+                    .session_list_admission
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| ErrorCode::CatalogBusy)?,
+            )
+        } else {
+            None
+        };
         let command_permit = self
             .0
             .admission
@@ -295,14 +319,17 @@ impl AgentExecution {
                 params,
                 reply,
                 cancel: None,
-                permit: command_permit,
+                permit: CommandPermits {
+                    _command: command_permit,
+                    _listing: listing_permit,
+                },
                 queued: std::time::Instant::now(),
             })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => ErrorCode::CatalogBusy,
                 mpsc::error::TrySendError::Closed(_) => ErrorCode::AgentIo,
             })?;
-        Ok(CatalogResponse {
+        Ok(AdmittedResponse {
             receiver,
             _permit: permit,
         })
@@ -341,7 +368,10 @@ impl AgentExecution {
                 params,
                 reply,
                 cancel,
-                permit,
+                permit: CommandPermits {
+                    _command: permit,
+                    _listing: None,
+                },
                 queued: std::time::Instant::now(),
             })
             .map_err(|error| match error {

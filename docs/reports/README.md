@@ -98,6 +98,8 @@
 
 ## Provider、Agent 与会话
 
+- [Pi 会话列表延迟与共享连接阻塞排查](providers/pi-session-list-performance-2026-10-21.md)
+
 - [Pi 模式移除验证](providers/pi-mode-removal-2026-10-24.md)
 
 - [OMP 本机六模型实测与兼容修补](providers/omp-local-model-audit-2026-10-24.md)

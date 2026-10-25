@@ -140,7 +140,6 @@ pub(super) async fn execution(
                 | "agent.model.set.request"
                 | "agent.thinking.set.request"
                 | "agent.config.apply.request"
-                | "provider.sessions.recent.list.request"
                 | "agent.import.request"
                 | "agent.refresh.request"
                 | "agent.fork_context.request"
@@ -221,12 +220,12 @@ pub(super) async fn timeline(
     context.respond(result).map_err(Into::into)
 }
 
-/// Try the catalog request branch and consume `pending` only on a match.
+/// Try the independently admitted response branch and consume `pending` only on a match.
 /// `state` supplies installed services; any `connection` argument owns subscriptions.
 /// Returns the branch's completion after execution or response admission.
 /// # Errors
 /// Returns `NotImplemented` without consuming the request, or propagates delivery failure.
-pub(super) fn catalog(
+pub(super) fn response_admission(
     pending: &mut Option<Context<'_>>,
     state: &State,
 ) -> Result<(), DispatchError> {
@@ -239,9 +238,10 @@ pub(super) fn catalog(
                 | "provider.features.list.request"
                 | "provider.snapshot.get.request"
                 | "provider.snapshot.refresh.request"
+                | "provider.sessions.recent.list.request"
         )
     }) else {
         return Err(DispatchError::NotImplemented);
     };
-    super::catalog::request(context, state).map_err(Into::into)
+    super::response_admission::request(context, state).map_err(Into::into)
 }

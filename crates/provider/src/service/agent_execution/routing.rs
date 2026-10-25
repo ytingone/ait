@@ -21,6 +21,7 @@ pub(super) struct Router {
     tasks: TaskTracker,
     reads: Arc<Semaphore>,
     providers: Arc<Semaphore>,
+    session_lists: Arc<Semaphore>,
     retirements: Arc<Semaphore>,
 }
 
@@ -32,6 +33,9 @@ impl Router {
             tasks: TaskTracker::new(),
             reads: Arc::new(Semaphore::new(16)),
             providers: Arc::new(Semaphore::new(16)),
+            session_lists: Arc::new(Semaphore::new(
+                super::response_admission::LISTING_CONCURRENCY,
+            )),
             retirements: Arc::new(Semaphore::new(32)),
         }
     }
@@ -110,7 +114,9 @@ impl Router {
                 reject(command, ErrorCode::CatalogBusy);
             }
         } else {
-            let reads = if (method_of(&command).starts_with("provider.")
+            let reads = if method_of(&command) == "provider.sessions.recent.list.request" {
+                self.session_lists.clone()
+            } else if (method_of(&command).starts_with("provider.")
                 && !method_of(&command).starts_with("provider.snapshot."))
                 || method_of(&command) == "agent.commands.list.request"
             {
